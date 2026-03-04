@@ -1,0 +1,247 @@
+---
+title: "Pitcher 2 - Pitching Report"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: false
+    includes:
+      in_header: pitcher2_header.tex
+  html_document:
+    df_print: paged
+params:
+  excel_path: "/Users/akhichappidi/PDP/2025 PDP Data Exercise.xlsx"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.retina = 1,
+  out.width = "100%",
+  fig.align = "center"
+)
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(patchwork)
+library(gt)
+library(scales)
+library(janitor)
+
+source("../R/utils.R")
+
+excel_path <- params$excel_path
+
+trackman_raw <- readxl::read_excel(excel_path, sheet = "Trackman Data") %>%
+  janitor::remove_empty("cols")
+
+pitcher_name <- "Pitcher 2"
+
+pitcher_df <- trackman_raw %>%
+  filter(Pitcher == pitcher_name)
+
+if (nrow(pitcher_df) == 0) {
+  stop("No Trackman rows found for Pitcher 2.")
+}
+
+pitcher_df <- pitcher_df %>%
+  mutate(
+    pitch_type = case_when(
+      !is.na(TaggedPitchType) & TaggedPitchType != "" ~ TaggedPitchType,
+      !is.na(AutoPitchType) & AutoPitchType != "" ~ AutoPitchType,
+      TRUE ~ "Unknown"
+    )
+  )
+
+total_pitches <- nrow(pitcher_df)
+
+valid_calls <- unique(stats::na.omit(trackman_raw$PitchCall))
+
+strike_calls_full <- c(
+  "StrikeCalled",
+  "StrikeSwinging",
+  "FoulBall",
+  "FoulBallNotFieldable",
+  "FoulBallFieldable",
+  "InPlay"
+)
+swings_calls_full <- c(
+  "StrikeSwinging",
+  "FoulBall",
+  "FoulBallNotFieldable",
+  "FoulBallFieldable",
+  "InPlay"
+)
+
+strike_calls <- intersect(strike_calls_full, valid_calls)
+swings_calls <- intersect(swings_calls_full, valid_calls)
+
+if (length(strike_calls) == 0) {
+  strike_calls <- c("StrikeCalled", "StrikeSwinging", "FoulBallNotFieldable", "InPlay")
+}
+if (length(swings_calls) == 0) {
+  swings_calls <- c("StrikeSwinging", "FoulBallNotFieldable", "InPlay")
+}
+
+strike_pitches <- sum(pitcher_df$PitchCall %in% strike_calls, na.rm = TRUE)
+swings <- sum(pitcher_df$PitchCall %in% swings_calls, na.rm = TRUE)
+whiffs <- sum(pitcher_df$PitchCall == "StrikeSwinging", na.rm = TRUE)
+
+strike_pct <- ifelse(total_pitches > 0, strike_pitches / total_pitches, NA_real_)
+swing_pct <- ifelse(total_pitches > 0, swings / total_pitches, NA_real_)
+whiff_pct <- ifelse(swings > 0, whiffs / swings, NA_real_)
+
+pitch_mix_df <- pitcher_df %>%
+  filter(!is.na(pitch_type), pitch_type != "") %>%
+  count(pitch_type, name = "n") %>%
+  mutate(
+    pct = n / sum(n),
+    pitch_type = stats::reorder(pitch_type, pct)
+  )
+
+velo_spin_by_type <- pitcher_df %>%
+  group_by(pitch_type) %>%
+  summarise(
+    pitches = n(),
+    avg_velo = mean(RelSpeed, na.rm = TRUE),
+    max_velo = max(RelSpeed, na.rm = TRUE),
+    avg_spin = mean(SpinRate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+overall_summary_tbl <- tibble::tibble(
+  Metric = c(
+    "Total pitches",
+    "Strike%",
+    "Swing%",
+    "Whiff%"
+  ),
+  Value = c(
+    as.character(total_pitches),
+    scales::percent(strike_pct, accuracy = 0.1),
+    scales::percent(swing_pct, accuracy = 0.1),
+    ifelse(is.na(whiff_pct), "N/A", scales::percent(whiff_pct, accuracy = 0.1))
+  )
+)
+
+velo_spin_gt <- velo_spin_by_type %>%
+  mutate(
+    `Pitch Mix %` = if (!is.null(pitch_mix_df) && nrow(pitch_mix_df) > 0) {
+      pct_match <- pitch_mix_df %>%
+        as.data.frame() %>%
+        select(pitch_type, pct)
+      mix_joined <- left_join(., pct_match, by = "pitch_type")
+      scales::percent(mix_joined$pct, accuracy = 0.1)
+    } else {
+      NA_character_
+    },
+    `Avg Velo` = round(avg_velo, 1),
+    `Max Velo` = round(max_velo, 1),
+    `Avg Spin` = round(avg_spin, 0)
+  ) %>%
+  select(
+    `Pitch Type` = pitch_type,
+    `Pitch Mix %`,
+    `Pitches` = pitches,
+    `Avg Velo`,
+    `Max Velo`,
+    `Avg Spin`
+  )
+
+dir.create("../outputs/tmp", showWarnings = FALSE, recursive = TRUE)
+
+gt1 <- overall_summary_tbl %>%
+  gt() %>%
+  cols_label(Metric = "Metric", Value = "Value") %>%
+  tab_header(title = "Summary") %>%
+  tab_options(table.font.size = px(10), data_row.padding = px(3), heading.padding = px(3))
+
+gt2 <- velo_spin_gt %>%
+  gt() %>%
+  tab_header(title = "Pitch Type (Velo, Spin)") %>%
+  tab_options(table.font.size = px(10), data_row.padding = px(3), heading.padding = px(3))
+
+try({
+  gt::gtsave(gt1, "../outputs/tmp/pitcher_tbl1.png")
+  gt::gtsave(gt2, "../outputs/tmp/pitcher_tbl2.png")
+}, silent = TRUE)
+
+# Plots
+pitch_mix_plot <- ggplot(pitch_mix_df, aes(x = pitch_type, y = pct)) +
+  geom_col(fill = "#2c7fb8") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  coord_flip() +
+  labs(title = "Pitch Mix", x = "Pitch Type", y = "Usage %") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none")
+
+velo_plot <- ggplot(pitcher_df, aes(x = pitch_type, y = RelSpeed, fill = pitch_type)) +
+  geom_boxplot(outlier.alpha = 0.4) +
+  labs(title = "Velocity", x = "Pitch Type", y = "Velocity (mph)") +
+  coord_flip() +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none")
+
+movement_plot <- ggplot(pitcher_df, aes(x = HorzBreak, y = InducedVertBreak, color = pitch_type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_point(alpha = 0.7, size = 1.5) +
+  coord_equal() +
+  labs(title = "Movement (IVB vs HB)", x = "Horizontal Break (in)", y = "Induced Vertical Break (in)", color = "Pitch Type") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "bottom", legend.direction = "horizontal", legend.key.size = unit(0.4, "cm"))
+
+pitcher_df <- pitcher_df %>%
+  mutate(
+    PlateLocSide = suppressWarnings(as.numeric(PlateLocSide)),
+    PlateLocHeight = suppressWarnings(as.numeric(PlateLocHeight))
+  )
+location_df <- pitcher_df %>%
+  filter(!is.na(PlateLocSide), !is.na(PlateLocHeight))
+
+location_plot <- if (nrow(location_df) == 0) {
+  ggplot() + theme_void() + labs(title = "Pitch Location (No data)")
+} else {
+  xmin_zone <- -0.83
+  xmax_zone <- 0.83
+  ymin_zone <- 1.5
+  ymax_zone <- 3.5
+  base_p <- ggplot(location_df, aes(x = PlateLocSide, y = PlateLocHeight, color = pitch_type)) +
+    geom_point(alpha = 0.6, size = 1.2)
+  base_p <- add_strikezone_9box(base_p, xmin = xmin_zone, xmax = xmax_zone, ymin = ymin_zone, ymax = ymax_zone)
+  base_p +
+    coord_equal(xlim = c(-1.5, 1.5), ylim = c(0, 5)) +
+    scale_x_continuous(breaks = seq(-1.5, 1.5, 0.5), labels = scales::number_format(accuracy = 0.1)) +
+    scale_y_continuous(breaks = 0:5, labels = scales::number_format(accuracy = 0.1)) +
+    labs(title = "Pitch Location", subtitle = paste0("n = ", nrow(location_df)), x = "PlateLocSide (in)", y = "PlateLocHeight (in)", color = "Pitch Type") +
+    theme_minimal(base_size = 9) +
+    theme(legend.position = "bottom", legend.direction = "horizontal", legend.key.size = unit(0.4, "cm"))
+}
+
+plots_combined <- (pitch_mix_plot | velo_plot) / (movement_plot | location_plot)
+
+if (knitr::is_html_output()) {
+  try(ggplot2::ggsave("../outputs/tmp/pitcher_plots.png", plot = plots_combined, width = 10, height = 5.5, dpi = 150), silent = TRUE)
+}
+```
+
+### Summary (Pitcher 2)
+
+```{r tables-top, out.width=c("49%","49%"), fig.show="hold"}
+if (file.exists("../outputs/tmp/pitcher_tbl1.png") && file.exists("../outputs/tmp/pitcher_tbl2.png")) {
+  knitr::include_graphics(c("../outputs/tmp/pitcher_tbl1.png", "../outputs/tmp/pitcher_tbl2.png"))
+} else {
+  gt1
+  gt2
+}
+```
+
+### Visuals
+
+```{r visuals, fig.width=10, fig.height=5, out.width="100%"}
+plots_combined
+```

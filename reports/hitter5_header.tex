@@ -1,0 +1,10 @@
+\pagestyle{empty}
+\raggedbottom
+\addtolength{\topmargin}{-0.25in}
+\addtolength{\textheight}{0.25in}
+\setlength{\parskip}{1.5pt}
+\makeatletter
+\renewcommand{\subsubsection}{\@startsection{subsubsection}{3}{\z@}{2pt}{1pt}{\normalsize\bfseries}}
+\makeatother
+\let\origmaketitle\maketitle
+\renewcommand{\maketitle}{\origmaketitle\vspace{-1em}}

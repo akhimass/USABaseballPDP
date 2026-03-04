@@ -1,0 +1,273 @@
+---
+title: "Hitter 5 - Hitting Report"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: false
+    includes:
+      in_header: hitter5_header.tex
+  html_document:
+    df_print: paged
+params:
+  excel_path: "/Users/akhichappidi/PDP/2025 PDP Data Exercise.xlsx"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.retina = 1,
+  out.width = "100%",
+  fig.align = "center"
+)
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(patchwork)
+library(gt)
+library(scales)
+library(janitor)
+
+source("../R/utils.R")
+
+excel_path <- params$excel_path
+
+trackman_raw <- readxl::read_excel(excel_path, sheet = "Trackman Data") %>%
+  janitor::remove_empty("cols")
+
+hitter_name <- "Hitter 5"
+
+hitter_df <- trackman_raw %>%
+  filter(Batter == hitter_name)
+
+if (nrow(hitter_df) == 0) {
+  stop("No Trackman rows found for Hitter 5.")
+}
+
+total_pitches <- nrow(hitter_df)
+
+valid_calls <- unique(stats::na.omit(trackman_raw$PitchCall))
+
+strike_calls_full <- c(
+  "StrikeCalled",
+  "StrikeSwinging",
+  "FoulBall",
+  "FoulBallNotFieldable",
+  "FoulBallFieldable",
+  "InPlay"
+)
+swings_calls_full <- c(
+  "StrikeSwinging",
+  "FoulBall",
+  "FoulBallNotFieldable",
+  "FoulBallFieldable",
+  "InPlay"
+)
+
+strike_calls <- intersect(strike_calls_full, valid_calls)
+swings_calls <- intersect(swings_calls_full, valid_calls)
+
+if (length(strike_calls) == 0) {
+  strike_calls <- c("StrikeCalled", "StrikeSwinging", "FoulBallNotFieldable", "InPlay")
+}
+if (length(swings_calls) == 0) {
+  swings_calls <- c("StrikeSwinging", "FoulBallNotFieldable", "InPlay")
+}
+
+strike_pitches <- sum(hitter_df$PitchCall %in% strike_calls, na.rm = TRUE)
+swings <- sum(hitter_df$PitchCall %in% swings_calls, na.rm = TRUE)
+whiffs <- sum(hitter_df$PitchCall == "StrikeSwinging", na.rm = TRUE)
+in_play <- sum(hitter_df$PitchCall == "InPlay", na.rm = TRUE)
+
+ball_calls <- c("BallCalled")
+if ("BallinDirt" %in% valid_calls) {
+  ball_calls <- union(ball_calls, "BallinDirt")
+}
+
+ball_pitches <- sum(hitter_df$PitchCall %in% ball_calls, na.rm = TRUE)
+
+ball_pct <- ifelse(total_pitches > 0, ball_pitches / total_pitches, NA_real_)
+strike_pct <- ifelse(total_pitches > 0, strike_pitches / total_pitches, NA_real_)
+swing_pct <- ifelse(total_pitches > 0, swings / total_pitches, NA_real_)
+whiff_pct <- ifelse(swings > 0, whiffs / swings, NA_real_)
+
+bb_df <- hitter_df %>%
+  filter(!is.na(ExitSpeed))
+
+if (nrow(bb_df) > 0) {
+  avg_ev <- mean(bb_df$ExitSpeed, na.rm = TRUE)
+  max_ev <- max(bb_df$ExitSpeed, na.rm = TRUE)
+  avg_la <- mean(bb_df$Angle, na.rm = TRUE)
+  p90_ev <- as.numeric(stats::quantile(bb_df$ExitSpeed, 0.9, na.rm = TRUE, type = 7))
+} else {
+  avg_ev <- NA_real_
+  max_ev <- NA_real_
+  avg_la <- NA_real_
+  p90_ev <- NA_real_
+}
+
+overall_tbl <- tibble::tibble(
+  Metric = c(
+    "Total pitches seen",
+    "Ball%",
+    "Strike%",
+    "Swing%",
+    "Whiff%",
+    "InPlay count",
+    "Avg ExitSpeed (batted balls)",
+    "Max ExitSpeed (batted balls)",
+    "Avg Launch Angle (batted balls)",
+    "90th percentile ExitSpeed"
+  ),
+  Value = c(
+    as.character(total_pitches),
+    scales::percent(ball_pct, accuracy = 0.1),
+    scales::percent(strike_pct, accuracy = 0.1),
+    scales::percent(swing_pct, accuracy = 0.1),
+    ifelse(is.na(whiff_pct), "N/A", scales::percent(whiff_pct, accuracy = 0.1)),
+    as.character(in_play),
+    ifelse(is.na(avg_ev), "N/A", as.character(round(avg_ev, 1))),
+    ifelse(is.na(max_ev), "N/A", as.character(round(max_ev, 1))),
+    ifelse(is.na(avg_la), "N/A", as.character(round(avg_la, 1))),
+    ifelse(is.na(p90_ev), "N/A", as.character(round(p90_ev, 1)))
+  )
+)
+
+results_tbl <- bb_df %>%
+  mutate(
+    result_key = dplyr::case_when(
+      !is.na(PlayResult) & !is.na(TaggedHitType) ~ paste(PlayResult, "-", TaggedHitType),
+      !is.na(PlayResult) ~ PlayResult,
+      !is.na(TaggedHitType) ~ TaggedHitType,
+      TRUE ~ "Unknown"
+    )
+  ) %>%
+  count(result_key, name = "n") %>%
+  mutate(
+    pct = n / sum(n)
+  ) %>%
+  arrange(desc(n))
+
+if (nrow(bb_df) > 0) {
+  ev_threshold <- stats::quantile(bb_df$ExitSpeed, 0.9, na.rm = TRUE, type = 7)
+  bb_df <- bb_df %>%
+    mutate(
+      is_top_ev = ExitSpeed >= ev_threshold
+    )
+}
+
+dir.create("../outputs/tmp", showWarnings = FALSE, recursive = TRUE)
+
+gt1 <- overall_tbl %>%
+  gt() %>%
+  cols_label(Metric = "Metric", Value = "Value") %>%
+  tab_header(title = "Plate Discipline & Outcomes") %>%
+  tab_options(table.font.size = px(10), data_row.padding = px(3), heading.padding = px(3))
+
+gt2 <- if (nrow(results_tbl) > 0) {
+  results_tbl %>%
+    mutate(`Percent` = scales::percent(pct, accuracy = 0.1)) %>%
+    select(`Result` = result_key, `Count` = n, `Percent`) %>%
+    gt() %>%
+    tab_header(title = "Results Breakdown") %>%
+    tab_options(table.font.size = px(10), data_row.padding = px(3), heading.padding = px(3))
+} else {
+  tibble(Note = "No batted-ball results") %>% gt() %>% tab_header(title = "Results Breakdown")
+}
+
+try({
+  gt::gtsave(gt1, "../outputs/tmp/hitter_tbl1.png")
+  gt::gtsave(gt2, "../outputs/tmp/hitter_tbl2.png")
+}, silent = TRUE)
+
+# Plots
+ev_la_plot <- if (nrow(bb_df) > 0) {
+  ggplot(bb_df, aes(x = Angle, y = ExitSpeed, color = is_top_ev)) +
+    geom_point(alpha = 0.7, size = 1.5) +
+    scale_color_manual(values = c("FALSE" = "#2c7fb8", "TRUE" = "#d73027"),
+                       labels = c("Other", "Top EV (90th+)"), name = "") +
+    labs(title = "EV vs Launch Angle", x = "Launch Angle (deg)", y = "Exit Velocity (mph)") +
+    theme_minimal(base_size = 9) +
+    theme(legend.position = "bottom", legend.direction = "horizontal")
+} else {
+  ggplot() + theme_void() + labs(title = "No batted-ball data")
+}
+
+ev_summary_plot <- if (nrow(bb_df) > 0) {
+  n_bb <- nrow(bb_df)
+  sub <- sprintf("n = %d | avg = %.1f | max = %.1f | p90 = %.1f",
+                 n_bb, avg_ev, max_ev, p90_ev)
+  ggplot(bb_df, aes(x = 1, y = ExitSpeed)) +
+    geom_boxplot(fill = "#2c7fb8", alpha = 0.7, outlier.alpha = 0) +
+    geom_jitter(width = 0.15, height = 0, alpha = 0.6, size = 1.2) +
+    labs(title = "Exit Velocity (Batted Balls)", subtitle = sub, x = "", y = "Exit Speed (mph)") +
+    theme_minimal(base_size = 9) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+} else {
+  ggplot() + theme_void() + labs(title = "Exit Velocity (Batted Balls)", subtitle = "No data")
+}
+
+spray_plot <- if ("Direction" %in% names(bb_df) && nrow(bb_df) > 0) {
+  ggplot(bb_df, aes(x = Direction, y = ExitSpeed, color = PlayResult)) +
+    geom_point(alpha = 0.7, size = 1.5) +
+    labs(title = "Spray", x = "Direction (deg)", y = "Exit Speed (mph)", color = "Play Result") +
+    theme_minimal(base_size = 9) +
+    theme(legend.position = "bottom", legend.direction = "horizontal")
+} else {
+  ggplot() + theme_void() + labs(title = "Spray (Direction not available)")
+}
+
+swings_df <- hitter_df %>%
+  filter(PitchCall %in% swings_calls)
+
+if (nrow(swings_df) > 0 && "PlateLocSide" %in% names(swings_df) && "PlateLocHeight" %in% names(swings_df)) {
+  swings_df <- swings_df %>%
+    mutate(
+      PlateLocSide = suppressWarnings(as.numeric(PlateLocSide)),
+      PlateLocHeight = suppressWarnings(as.numeric(PlateLocHeight))
+    )
+}
+
+heatmap_plot <- if (nrow(swings_df) > 0 &&
+                    "PlateLocSide" %in% names(swings_df) &&
+                    "PlateLocHeight" %in% names(swings_df) &&
+                    sum(!is.na(swings_df$PlateLocSide) & !is.na(swings_df$PlateLocHeight)) > 0) {
+  p <- ggplot(swings_df, aes(x = PlateLocSide, y = PlateLocHeight)) +
+    stat_bin2d(bins = 25) +
+    scale_fill_gradient(low = "#f7fbff", high = "#08306b", name = "Swings") +
+    coord_equal(xlim = c(-1.5, 1.5), ylim = c(0, 5)) +
+    labs(title = "Swing Map", x = "PlateLocSide", y = "PlateLocHeight") +
+    theme_minimal(base_size = 9) +
+    theme(legend.position = "right")
+  add_strikezone_9box(p, xmin = -0.83, xmax = 0.83, ymin = 1.5, ymax = 3.5)
+} else {
+  ggplot() + theme_void() + labs(title = "Swing Map (insufficient data)")
+}
+
+plots_combined <- (ev_la_plot | spray_plot) / (ev_summary_plot | heatmap_plot)
+
+if (knitr::is_html_output()) {
+  try(ggplot2::ggsave("../outputs/tmp/hitter_plots.png", plot = plots_combined, width = 10, height = 5.5, dpi = 150), silent = TRUE)
+}
+```
+
+### Summary (Hitter 5)
+
+```{r tables-top, out.width="49%", fig.show="hold"}
+if (file.exists("../outputs/tmp/hitter_tbl1.png") && file.exists("../outputs/tmp/hitter_tbl2.png")) {
+  knitr::include_graphics(c("../outputs/tmp/hitter_tbl1.png", "../outputs/tmp/hitter_tbl2.png"))
+} else {
+  gt1
+  gt2
+}
+```
+
+### Visuals
+
+```{r visuals, fig.width=10, fig.height=5, out.width="100%"}
+plots_combined
+```
